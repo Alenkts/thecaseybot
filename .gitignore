@@ -41,3 +41,5 @@ test_*.py
 
 # Claude Code local settings (per-machine tool permissions)
 .claude/settings.local.json
+
+tests_llm/

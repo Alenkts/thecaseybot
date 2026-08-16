@@ -109,7 +109,13 @@ def run(path, config_path, limit, batch_size, model, provider):
         batch = lines[start:start + batch_size]
         llm_labels = classify_batch(provider, client, model, batch)
         for text, (llm_label, note) in zip(batch, llm_labels):
-            regex_label = classify(text).type.value
+            # classify() (the regex path) only ever resolves ENTRY/EXIT —
+            # it returns None for everything else (see its docstring), which
+            # is the common case for trim_conditions.txt specifically. "NONE"
+            # here means "regex had no opinion", distinct from the four real
+            # labels either side can actually emit.
+            resolved = classify(text)
+            regex_label = resolved.type.value if resolved is not None else "NONE"
             results.append((text, regex_label, llm_label, note))
         print(f"...classified {min(start + batch_size, len(lines))}/{len(lines)}", file=sys.stderr)
 
