@@ -14,10 +14,12 @@ signal_queue, just request/response instead of fire-and-forget.
 
 Classification is two-stage: signal_classifier.classify() (regex, ENTRY/EXIT
 only) first; anything it can't confidently place (None) falls through to
-llm_classifier.classify() (Claude, decides EXIT/TRIM/ADD/NOISE) — see both
-modules' docstrings for why the split. discord_listener awaits
-on_message_text so the LLM call (a real network round trip) never blocks
-the same event loop carrying the Discord connection's heartbeat.
+llm_classifier.classify() (decides EXIT/TRIM/ADD/NOISE via whichever
+provider config.yaml's llm.provider names — Anthropic or Gemini, see
+llm_providers.py) — see both modules' docstrings for why the split.
+discord_listener awaits on_message_text so the LLM call (a real network
+round trip) never blocks the same event loop carrying the Discord
+connection's heartbeat.
 
 Every classified message is logged to db.signals via alerting.log_signal
 regardless of the UI's pause state, so the Signal feed stays a complete
@@ -35,12 +37,12 @@ import sys
 import threading
 import time
 
-import anthropic
 import yaml
 
 import db
 import discord_listener
 import llm_classifier
+import llm_providers
 import trade_executor
 import web.server
 from alerting import build_logger, log_signal
@@ -60,7 +62,8 @@ def main():
 
     db.init_db()
     logger = build_logger(bot_cfg["log_file"])
-    llm_client = anthropic.AsyncAnthropic(api_key=llm_cfg["api_key"])
+    llm_provider = llm_cfg.get("provider", "anthropic")
+    llm_client = llm_providers.make_client(llm_provider, llm_cfg["api_key"], is_async=True)
     llm_model = llm_cfg["model"]
 
     signal_queue = queue.Queue()
@@ -84,9 +87,9 @@ def main():
         stage = "regex"
         signal = classify(text)
         if signal is None:
-            stage = "claude"
-            signal = await llm_classifier.classify(text, llm_client, llm_model)
-            db.increment_counter("claude_call_count")
+            stage = "llm"
+            signal = await llm_classifier.classify(text, llm_client, llm_model, provider=llm_provider)
+            db.increment_counter("llm_call_count")
 
         blocked_reason = None
         if signal.type != SignalType.NOISE and db.get_paused():

@@ -15,10 +15,17 @@ bot:
 
 # used by llm_trim_evaluator.py (offline TRIM/NOISE eval) and by the live
 # TRIM/ADD/NOISE routing in llm_classifier.py for messages the regex
-# classifier can't confidently place
+# classifier can't confidently place. See llm_providers.py for how
+# provider/model get turned into an actual API call.
 llm:
-  api_key: "PUT_YOUR_ANTHROPIC_API_KEY_HERE"
-  model: "claude-haiku-4-5-20251001"   # cheap/fast — fine for this triage-style classification
+  provider: "anthropic"     # "anthropic" | "gemini"
+  # Anthropic: console.anthropic.com  |  Gemini: aistudio.google.com/apikey
+  api_key: "PUT_YOUR_API_KEY_HERE"
+  # cheap/fast — fine for this triage-style classification. Pick a model
+  # that matches `provider` above:
+  #   anthropic: claude-haiku-4-5-20251001 (or claude-sonnet-5 / claude-opus-5 / claude-fable-5)
+  #   gemini:    gemini-2.5-flash (or gemini-2.5-pro / gemini-2.5-flash-lite)
+  model: "claude-haiku-4-5-20251001"
 
 # --- read starting Phase 2 (IBKR paper/live wiring) ---
 risk:

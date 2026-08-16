@@ -46,7 +46,7 @@ def build_logger(log_file):
 
 def log_signal(logger, signal, stage, blocked_reason=None):
     """Logs to casey_bot.log as before, and inserts a row into db.signals
-    for the web UI's feed — stage ("regex"/"claude") and blocked_reason
+    for the web UI's feed — stage ("regex"/"llm"/"manual") and blocked_reason
     (e.g. "bot paused") come from the caller, which is the only place that
     knows which classifier resolved the message and whether it was actually
     enqueued for execution. Returns the new row's id so the caller can

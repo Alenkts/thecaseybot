@@ -4,8 +4,8 @@ Reads Casey's Discord, places IBKR options orders accordingly
 ## What it does
 
 - Watches a Discord channel/author for trading calls and classifies each message
-  as ENTRY / EXIT / TRIM / ADD / NOISE (regex first, Claude as fallback for
-  anything ambiguous).
+  as ENTRY / EXIT / TRIM / ADD / NOISE (regex first, an LLM — Anthropic or
+  Gemini, your choice — as fallback for anything ambiguous).
 - Turns a classified signal into a risk-gated Interactive Brokers options order.
 - Serves a local control UI, **Casey Bridge**, at `http://127.0.0.1:8787` — live
   positions, signal feed, order history, and a Settings screen.
@@ -17,7 +17,9 @@ Reads Casey's Discord, places IBKR options orders accordingly
   paper account recommended to start
 - A Discord personal account token (self-bot mode — see
   [Getting your Discord token](#getting-your-discord-token))
-- An [Anthropic API key](https://console.anthropic.com/)
+- An LLM API key for whichever provider you set in `llm.provider` —
+  [Anthropic](https://console.anthropic.com/) (default) or
+  [Gemini](https://aistudio.google.com/apikey)
 
 ## Setup
 
@@ -45,10 +47,19 @@ session: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
 Either script copies `config.example.yaml` to `config.yaml` if it doesn't
 already exist. Fill it in:
 - `discord.*` — see [Getting your Discord token](#getting-your-discord-token)
-- `llm.api_key` — your Anthropic API key
+- `llm.provider` — `"anthropic"` (default) or `"gemini"`; `llm.api_key` — the
+  matching provider's key; `llm.model` — see the comments in
+  `config.example.yaml` for valid model IDs per provider
 - `ibkr.*` — see [IBKR TWS/Gateway API setup](#ibkr-twsgateway-api-setup)
 - `risk.*` — see the [config reference](#risk-config-reference) below; also
   editable live from the Settings screen once running
+
+> **Upgrading an existing `config.yaml`:** the Settings screen's provider
+> dropdown can only change an `llm.provider` key that already exists in your
+> `config.yaml` (it never creates new config keys — see `_patch_config` in
+> `web/server.py`). If your `config.yaml` predates the Gemini option, add
+> `provider: "anthropic"` under `llm:` by hand once — after that the
+> dropdown works normally.
 
 Then run it — macOS/Linux: `./run.sh`, Windows: `.\run.ps1`. Both just launch
 the bot (run the install script first if `venv` or `config.yaml` isn't there

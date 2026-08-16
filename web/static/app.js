@@ -26,14 +26,26 @@ const COLORS = {
   NOISE: { fg: "#75758a", bg: "#ffffff", border: "#d9d9dd" },
 };
 
-// The Model dropdown's only choices — llm.model is sent straight to
-// Anthropic's API (see llm_classifier.py's classify()), so this list needs
-// to be kept current with whatever models the bot should be allowed to run.
-const KNOWN_MODELS = [
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-  { id: "claude-sonnet-5", label: "Sonnet 5" },
-  { id: "claude-opus-5", label: "Opus 5" },
-  { id: "claude-fable-5", label: "Fable 5" },
+// The Model dropdown's choices, keyed by provider — llm.model is sent
+// straight to whichever provider's API llm.provider names (see
+// llm_providers.py / llm_classifier.py's classify()), so each list needs to
+// be kept current with whatever models the bot should be allowed to run.
+const MODELS_BY_PROVIDER = {
+  anthropic: [
+    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
+    { id: "claude-opus-5", label: "Opus 5" },
+    { id: "claude-fable-5", label: "Fable 5" },
+  ],
+  gemini: [
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
+  ],
+};
+const KNOWN_PROVIDERS = [
+  { id: "anthropic", label: "Anthropic (Claude)" },
+  { id: "gemini", label: "Gemini" },
 ];
 
 function escapeHtml(s) {
@@ -345,8 +357,8 @@ function renderDash() {
         </div>
         <div class="item">
           <span class="dot" style="background:#003c33"></span>
-          <span>Claude</span>
-          <span class="detail">${state.health.claude.call_count} calls</span>
+          <span>${escapeHtml((KNOWN_PROVIDERS.find((p) => p.id === state.health.llm.provider) || {}).label || state.health.llm.provider)}</span>
+          <span class="detail">${state.health.llm.call_count} calls</span>
         </div>
         <div class="item">
           <span class="dot" style="background:${state.health.ibkr.connected ? "#003c33" : "#93939f"}"></span>
@@ -432,7 +444,7 @@ function renderFeedRow(r) {
       <div class="time mono">${fmtTime(r.ts)}</div>
       <div class="verdict">
         <span class="tag" style="background:${c.bg};color:${c.fg};border-color:${c.border}">${r.type}</span>
-        <span class="stage">${r.stage === "claude" ? "Claude decided" : r.stage === "manual" ? "Manual UI" : "Regex matched"}</span>
+        <span class="stage">${r.stage === "llm" || r.stage === "claude" ? "LLM decided" : r.stage === "manual" ? "Manual UI" : "Regex matched"}</span>
       </div>
       <div class="raw">
         <div class="text">“${escapeHtml(r.raw_text)}”</div>
@@ -664,9 +676,16 @@ function renderSet() {
               <input id="set-discord-user" value="${escapeHtml(d.discord.casey_user_id ?? "")}" class="text-input mono"></div>
             <div class="full"><div class="field-label">LLM API key</div>
               <input type="password" id="set-llm-key" placeholder="${d.llm.api_key_set ? "•••••••••••••••• (set)" : "not set"}" class="text-input"></div>
+            <div class="full"><div class="field-label">Provider</div>
+              <select id="set-llm-provider" class="text-input mono">
+                ${KNOWN_PROVIDERS.map((p) => `
+                  <option value="${p.id}" ${d.llm.provider === p.id ? "selected" : ""}>${p.label}</option>
+                `).join("")}
+              </select>
+            </div>
             <div class="full"><div class="field-label">Model</div>
               <select id="set-llm-model" class="text-input mono">
-                ${KNOWN_MODELS.map((m) => `
+                ${(MODELS_BY_PROVIDER[d.llm.provider] || []).map((m) => `
                   <option value="${m.id}" ${d.llm.model === m.id ? "selected" : ""}>${m.label} (${m.id})</option>
                 `).join("")}
               </select>
@@ -743,7 +762,7 @@ function buildSettingsPayload(d) {
       user_token: d.discord._token_input || undefined,
     },
     ibkr: { host: d.ibkr.host, port: +d.ibkr.port, client_id: +d.ibkr.client_id },
-    llm: { model: d.llm.model, api_key: d.llm._key_input || undefined },
+    llm: { provider: d.llm.provider, model: d.llm.model, api_key: d.llm._key_input || undefined },
     reconnect: {
       retry_on_reconnect: d.reconnect.retry_on_reconnect,
       retry_timeout_mins: d.reconnect.retry_timeout_mins,
@@ -789,6 +808,22 @@ function wireSettingsInputs() {
   wireLiveInput("set-discord-token", (e) => { ui.settingsDraft.discord._token_input = e.target.value; });
   wireLiveInput("set-llm-key", (e) => { ui.settingsDraft.llm._key_input = e.target.value; });
   wireLiveInput("set-llm-model", (e) => { ui.settingsDraft.llm.model = e.target.value; });
+  // Not wireLiveInput: changing provider changes which models are valid, so
+  // the model <select>'s options need to be rebuilt — same "full rebuild is
+  // harmless for non-text controls" reasoning as the pill/toggle actions
+  // above (see rerenderSettingsForm's comment), just triggered directly
+  // from a <select> change instead of the data-action delegated handler.
+  const providerEl = document.getElementById("set-llm-provider");
+  if (providerEl) {
+    providerEl.addEventListener("change", (e) => {
+      ui.settingsDraft.llm.provider = e.target.value;
+      const models = MODELS_BY_PROVIDER[e.target.value] || [];
+      if (!models.some((m) => m.id === ui.settingsDraft.llm.model)) {
+        ui.settingsDraft.llm.model = models[0]?.id || "";
+      }
+      rerenderSettingsForm();
+    });
+  }
   wireLiveInput("set-ibkr-host", (e) => { ui.settingsDraft.ibkr.host = e.target.value; });
   wireLiveInput("set-ibkr-port", (e) => { ui.settingsDraft.ibkr.port = +e.target.value; });
   wireLiveInput("set-ibkr-client", (e) => { ui.settingsDraft.ibkr.client_id = +e.target.value; });

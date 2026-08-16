@@ -146,7 +146,9 @@ def _ibkr_connected():
     return ibkr_last is not None and (time.time() - float(ibkr_last)) < 10
 
 
-def _health(discord_cfg):
+def _health(config):
+    discord_cfg = config.get("discord", {})
+    llm_cfg = config.get("llm", {})
     last_msg = db.get_bot_state("discord_last_message_ts")
     ibkr_last = db.get_bot_state("ibkr_last_snapshot_ts")
     return {
@@ -155,7 +157,10 @@ def _health(discord_cfg):
             "channel": _snowflake_str(discord_cfg.get("channel_id")),
             "last_message_ts": float(last_msg) if last_msg else None,
         },
-        "claude": {"call_count": int(db.get_bot_state("claude_call_count", "0") or 0)},
+        "llm": {
+            "provider": llm_cfg.get("provider", "anthropic"),
+            "call_count": int(db.get_bot_state("llm_call_count", "0") or 0),
+        },
         "ibkr": {
             "connected": _ibkr_connected(),
             "last_snapshot_ts": float(ibkr_last) if ibkr_last else None,
@@ -241,7 +246,11 @@ def _settings_payload(config):
             "host": ibkr_cfg.get("host"), "port": ibkr_cfg.get("port"),
             "client_id": ibkr_cfg.get("client_id"),
         },
-        "llm": {"model": llm_cfg.get("model"), "api_key_set": bool(llm_cfg.get("api_key"))},
+        "llm": {
+            "provider": llm_cfg.get("provider", "anthropic"),
+            "model": llm_cfg.get("model"),
+            "api_key_set": bool(llm_cfg.get("api_key")),
+        },
         # same defaults as trade_executor.load_reconnect_config, so the UI
         # shows the behavior a missing/partial reconnect: section actually
         # falls back to rather than a misleading blank/off state. The
@@ -287,7 +296,7 @@ def create_app(config_path, signal_queue, validation_queue, logger):
 
         return jsonify({
             "bar": {"paused": paused, "mode": "live" if live else "dry", "status_text": status_text},
-            "health": _health(discord_cfg),
+            "health": _health(config),
             "kpis": _kpis(trips),
             "positions": db.get_positions(),
             "feed": db.get_recent_signals(limit=300),

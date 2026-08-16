@@ -4,8 +4,8 @@ Wires classified signals into actual IBKR orders.
 ENTRY, and most EXIT, come from signal_classifier.py's regex path (fast,
 deterministic). TRIM, ADD, and any EXIT phrased in a way the regex doesn't
 recognize (future tense, or split across sentences) come from
-llm_classifier.py — Claude's call on any message the regex couldn't
-confidently place — since "half"/"some"/"trimming"/"adding"/"the rest"
+llm_classifier.py — the configured LLM provider's call on any message the
+regex couldn't confidently place — since "half"/"some"/"trimming"/"adding"/"the rest"
 language is genuinely ambiguous between a partial trim, a full close, an
 add, and plain commentary in a way regex kept getting wrong at scale (see
 signal_classifier.py's docstring).

@@ -6,7 +6,8 @@ downstream in Phase 1 — this is read + classify + log only.
 on_message_text is awaited (must be an async function): the regex path in
 signal_classifier.classify() is effectively instant, but anything it can't
 resolve now falls through to llm_classifier.classify(), a real network call
-to Claude (~1-2s). Calling that synchronously from here would block this
+to whichever LLM provider is configured (~1-2s — see llm_providers.py).
+Calling that synchronously from here would block this
 same asyncio event loop that's also carrying the Discord connection's
 heartbeat — awaiting it instead lets the loop keep servicing the connection
 while the call is in flight.

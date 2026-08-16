@@ -5,6 +5,7 @@ discord.py-self>=2.0
 pyyaml>=6.0
 ib_async
 anthropic>=0.40
+google-genai>=1.0   # Gemini provider — see llm_providers.py; config.yaml's llm.provider picks anthropic vs gemini
 flask>=3.0
 ruamel.yaml>=0.18   # round-trip YAML — web/server.py's Settings screen writes config.yaml without destroying its comments
 tzdata   # zoneinfo (used by trade_executor.py's price_type: AUTO) has no system IANA database to fall back on on Windows

@@ -21,13 +21,19 @@ import argparse
 import csv
 import sys
 
-import anthropic
 import yaml
 
+import llm_providers
 from signal_classifier import classify
 
 DEFAULT_BATCH_SIZE = 25
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_PROVIDER = "anthropic"
+# keyed by provider so a --provider gemini run without --model still picks a
+# sane default instead of trying to send a Claude model ID to Gemini
+DEFAULT_MODEL_BY_PROVIDER = {
+    "anthropic": "claude-haiku-4-5-20251001",
+    "gemini": "gemini-2.5-flash",
+}
 
 SYSTEM_PROMPT = """You are grading raw Discord messages from a day-trading options-alert channel (0DTE SPY/QQQ/IWM-style calls/puts). One trader posts these live while a position is open. Classify each message independently, on its own, as exactly one of:
 
@@ -67,7 +73,9 @@ def load_llm_config(config_path):
         config = yaml.safe_load(f)
     try:
         llm_cfg = config["llm"]
-        return llm_cfg["api_key"], llm_cfg.get("model", DEFAULT_MODEL)
+        provider = llm_cfg.get("provider", DEFAULT_PROVIDER)
+        default_model = DEFAULT_MODEL_BY_PROVIDER.get(provider, DEFAULT_MODEL_BY_PROVIDER[DEFAULT_PROVIDER])
+        return llm_cfg["api_key"], llm_cfg.get("model", default_model), provider
     except KeyError:
         sys.exit(f"{config_path} needs an `llm: api_key:` entry — see config.example.yaml")
 
@@ -77,27 +85,20 @@ def load_lines(path):
         return [line.strip() for line in f if line.strip()]
 
 
-def classify_batch(client, model, texts):
+def classify_batch(provider, client, model, texts):
     numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        tools=[RECORD_LABELS_TOOL],
-        tool_choice={"type": "tool", "name": "record_labels"},
-        messages=[{"role": "user", "content": numbered}],
+    tool_input = llm_providers.classify_sync(
+        provider, client, model, SYSTEM_PROMPT, RECORD_LABELS_TOOL, numbered, max_tokens=4096,
     )
-    for block in resp.content:
-        if block.type == "tool_use":
-            labels = {item["i"]: (item["label"], item.get("note", "")) for item in block.input["labels"]}
-            return [labels.get(i, ("NOISE", "missing from model response")) for i in range(len(texts))]
-    raise RuntimeError(f"no tool_use block in response: {resp.content}")
+    labels = {item["i"]: (item["label"], item.get("note", "")) for item in tool_input["labels"]}
+    return [labels.get(i, ("NOISE", "missing from model response")) for i in range(len(texts))]
 
 
-def run(path, config_path, limit, batch_size, model):
-    api_key, configured_model = load_llm_config(config_path)
-    model = model or configured_model
-    client = anthropic.Anthropic(api_key=api_key)
+def run(path, config_path, limit, batch_size, model, provider):
+    api_key, configured_model, configured_provider = load_llm_config(config_path)
+    provider = provider or configured_provider
+    model = model or (configured_model if provider == configured_provider else DEFAULT_MODEL_BY_PROVIDER.get(provider))
+    client = llm_providers.make_client(provider, api_key, is_async=False)
 
     lines = load_lines(path)
     if limit:
@@ -106,7 +107,7 @@ def run(path, config_path, limit, batch_size, model):
     results = []
     for start in range(0, len(lines), batch_size):
         batch = lines[start:start + batch_size]
-        llm_labels = classify_batch(client, model, batch)
+        llm_labels = classify_batch(provider, client, model, batch)
         for text, (llm_label, note) in zip(batch, llm_labels):
             regex_label = classify(text).type.value
             results.append((text, regex_label, llm_label, note))
@@ -143,8 +144,10 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None, help="only classify the first N lines (cheap sanity check)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--model", default=None, help="overrides the model set in config.yaml's llm.model")
+    parser.add_argument("--provider", default=None, choices=llm_providers.SUPPORTED_PROVIDERS,
+                         help="overrides the provider set in config.yaml's llm.provider")
     parser.add_argument("--out", default=None, help="write every row (not just disagreements) to this CSV path")
     args = parser.parse_args()
 
-    results = run(args.file, args.config, args.limit, args.batch_size, args.model)
+    results = run(args.file, args.config, args.limit, args.batch_size, args.model, args.provider)
     report(results, args.out)

@@ -10,12 +10,17 @@ or split across sentences ("The rest of my puts are getting destroyed. I'm
 gonna sell them.") in ways the regex's same-sentence, present-tense patterns
 don't catch — see Team2Trading.txt for how common this shape is.
 
-Uses AsyncAnthropic, not the sync client llm_trim_evaluator.py uses: this
-runs inline in discord_listener's asyncio event loop, and a blocking call
-here would stall the Discord connection (heartbeats, other events) for
-however long a live call takes — see Notes.md-adjacent latency testing,
-roughly 1-2s per uncached call. A timeout is set so one slow/stuck request
-can't hang the listener indefinitely.
+Uses the async path of llm_providers.classify_async, not the sync one
+llm_trim_evaluator.py uses: this runs inline in discord_listener's asyncio
+event loop, and a blocking call here would stall the Discord connection
+(heartbeats, other events) for however long a live call takes — see
+Notes.md-adjacent latency testing, roughly 1-2s per uncached call. A timeout
+is set so one slow/stuck request can't hang the listener indefinitely.
+
+Provider-agnostic: `client` and `provider` come from whatever
+llm_providers.make_client() built in bot.py (Anthropic or Gemini today —
+see llm_providers.py). This module only owns the prompt, the tool schema,
+and turning the tool call's arguments into a Signal.
 
 Fails safe: any error, timeout, or malformed response falls back to NOISE
 rather than risking an unintended order from a degraded classification —
@@ -25,8 +30,7 @@ stance on ENTRY.
 
 import logging
 
-import anthropic
-
+import llm_providers
 from signal_classifier import Signal, SignalType
 
 _logger = logging.getLogger("casey_bot")
@@ -62,43 +66,36 @@ ROUTE_TOOL = {
 }
 
 
-async def classify(text, client, model):
+async def classify(text, client, model, provider="anthropic"):
     """text: the raw (mention-unstripped is fine) Discord message.
-    client: an anthropic.AsyncAnthropic instance, created once at startup.
+    client: whatever llm_providers.make_client(provider, ..., is_async=True)
+    returned, created once at startup.
+    provider: "anthropic" or "gemini" (see llm_providers.SUPPORTED_PROVIDERS)
+    — must match the provider `client` was built for.
     Returns a Signal — never raises."""
     try:
-        resp = await client.messages.create(
-            model=model,
-            max_tokens=256,
-            system=SYSTEM_PROMPT,
-            tools=[ROUTE_TOOL],
-            tool_choice={"type": "tool", "name": "route_signal"},
-            messages=[{"role": "user", "content": text}],
-            timeout=REQUEST_TIMEOUT_SECS,
+        tool_input = await llm_providers.classify_async(
+            provider, client, model, SYSTEM_PROMPT, ROUTE_TOOL, text,
+            max_tokens=256, timeout_secs=REQUEST_TIMEOUT_SECS,
         )
     except Exception as e:
         _logger.exception(f"[llm_classifier] API call failed for {text!r} — treating as NOISE")
         return Signal(type=SignalType.NOISE, reason=f"llm_classifier error: {e}", raw_text=text)
 
-    for block in resp.content:
-        if block.type == "tool_use":
-            label = block.input.get("label")
-            if label not in ("EXIT", "TRIM", "ADD", "NOISE"):
-                _logger.warning(f"[llm_classifier] unexpected label {label!r} for {text!r} — treating as NOISE")
-                return Signal(type=SignalType.NOISE, reason=f"llm_classifier returned unrecognized label {label!r}", raw_text=text)
-            # uppercase/stripped defensively — _resolve_target_position
-            # matches this against contract.symbol with a plain ==, and the
-            # regex path's ticker resolution (signal_parser.TICKER_ALIASES)
-            # is always uppercase already, so a lowercase/mixed-case ticker
-            # here would silently fail to match a real open position and
-            # get skipped as if nothing were held.
-            ticker = (block.input.get("ticker") or "").strip().upper() or None
-            return Signal(
-                type=SignalType[label],
-                ticker=ticker,
-                reason="llm_classifier",
-                raw_text=text,
-            )
+    label = tool_input.get("label")
+    if label not in ("EXIT", "TRIM", "ADD", "NOISE"):
+        _logger.warning(f"[llm_classifier] unexpected label {label!r} for {text!r} — treating as NOISE")
+        return Signal(type=SignalType.NOISE, reason=f"llm_classifier returned unrecognized label {label!r}", raw_text=text)
 
-    _logger.warning(f"[llm_classifier] no tool_use block in response for {text!r} — treating as NOISE")
-    return Signal(type=SignalType.NOISE, reason="llm_classifier: no tool_use block in response", raw_text=text)
+    # uppercase/stripped defensively — _resolve_target_position matches this
+    # against contract.symbol with a plain ==, and the regex path's ticker
+    # resolution (signal_parser.TICKER_ALIASES) is always uppercase already,
+    # so a lowercase/mixed-case ticker here would silently fail to match a
+    # real open position and get skipped as if nothing were held.
+    ticker = (tool_input.get("ticker") or "").strip().upper() or None
+    return Signal(
+        type=SignalType[label],
+        ticker=ticker,
+        reason="llm_classifier",
+        raw_text=text,
+    )
