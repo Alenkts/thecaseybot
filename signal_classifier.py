@@ -92,6 +92,8 @@ CLOSING_TRIGGERS = [
     (re.compile(r"\bsold\b(?!\s+off\b)", re.IGNORECASE), "sold"),
     (re.compile(r"\b(?:took|taking)\b(?:\s+\S+){0,4}?\s+off\b", re.IGNORECASE), "took_off"),
     (re.compile(r"\bclosed\s+(?:these|this|my|the)?\s*(?:runners?|position|contracts?|cons)\b.*\bout\b", re.IGNORECASE), "closed_out"),
+    (re.compile(r"\b(?:i'?m\s+|i\s+am\s+)?cutt?ing\b", re.IGNORECASE), "cutting"),
+    (re.compile(r"\bcut\s+(?:these|this|my|the)?\s*(?:runners?|position|contracts?|cons|puts?|calls?)\b", re.IGNORECASE), "cut"),
     (re.compile(r"\bscal(?:e|ing)\s+out\b", re.IGNORECASE), "scale_out"),
     (re.compile(r"\btrim(?:ming|med|s)?\b", re.IGNORECASE), "trim"),
     (re.compile(r"\bi'?m\s+selling\b|\bi\s+am\s+selling\b", re.IGNORECASE), "selling"),
@@ -102,7 +104,7 @@ CLOSING_TRIGGERS = [
 # Anything else found by CLOSING_TRIGGERS ("trim", "selling", "scale_out")
 # is only ever EXIT here when FULL_WORD_RE also matches — on its own it's
 # ambiguous and now routes to the LLM instead of defaulting to TRIM.
-EXIT_DEFAULT_VERBS = {"stopped_out", "took_the_l", "out", "sold", "closed_out"}
+EXIT_DEFAULT_VERBS = {"stopped_out", "took_the_l", "out", "sold", "closed_out", "cutting", "cut"}
 
 ENTRY_VERB_RE = re.compile(
     r"\bi'?m\s+taking\b|\btaking\b|\bi\s+got\b|\bi\s+(?:just\s+)?(?:added|adding)\b",

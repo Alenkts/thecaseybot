@@ -24,7 +24,7 @@ llm:
   # cheap/fast — fine for this triage-style classification. Pick a model
   # that matches `provider` above:
   #   anthropic: claude-haiku-4-5-20251001 (or claude-sonnet-5 / claude-opus-5 / claude-fable-5)
-  #   gemini:    gemini-2.5-flash (or gemini-2.5-pro / gemini-2.5-flash-lite)
+  #   gemini:    gemini-3.7-flash (or gemini-3.6-flash / gemini-3.5-flash / gemini-flash-latest)
   model: "claude-haiku-4-5-20251001"
 
 # --- read starting Phase 2 (IBKR paper/live wiring) ---

@@ -39,10 +39,10 @@ REQUEST_TIMEOUT_SECS = 10.0
 
 SYSTEM_PROMPT = """You are routing a live Discord message from a day-trading options-alert channel (0DTE SPY/QQQ/IWM-style calls/puts). A fast regex classifier already ruled out this message as a clean ENTRY (opening a brand new position) or a clean, unconditional EXIT/TRIM/ADD phrasing it recognizes — decide which of these four it actually is:
 
-EXIT  - fully closing the ENTIRE remaining position right now: "selling all/everything/the rest/what's left", "I'm out", "closed it all", "sold mine" — the whole thing, not a fraction.
-TRIM  - reducing part of an already-open position right now (selling half/some/most/a few, "taking some off", "scaling out", "trimming", "locking in some gains") — anything short of closing the whole thing.
+EXIT  - fully closing the ENTIRE remaining position right now: "selling all/everything/the rest/what's left", "I'm out", "closed it all", "sold mine", "cutting my puts/calls/position", "cutting here" — the whole thing, not a fraction.
+TRIM  - reducing/selling part of an already-open position right now (selling half/some/most/a few, "taking some off the table", "scaling out", "trimming", "locking in some gains") — selling to reduce size.
 ADD   - adding more to an existing position at the same ticker right now (averaging in), e.g. "adding more here", "adding this dip", "adding a few puts here".
-NOISE - anything else: chart/market commentary, advice or encouragement to the channel that isn't the trader's own live action, a conditional/future intent that hasn't happened yet, a past-tense recap, or any other non-actionable text.
+NOISE - anything else: chart/market commentary, advice or encouragement to the channel that isn't the trader's own live action, a conditional/future intent that hasn't happened yet, a past-tense recap, or any other non-actionable text. Note: "taking some of these / puts / calls" describes BUYING/entering contracts, not trimming. If an entry-shaped message lacks a strike/ticker so the regex couldn't enter it, classify as NOISE (or ADD if explicitly adding to an open trade), never TRIM.
 
 The single most common error here is conditional/future intent — a plan for what the trader WILL do if some price level hits, not something happening now. This is NOISE, never EXIT/TRIM/ADD, no matter how specific or confident the wording sounds:
   - Any "if/when/once/unless" clause naming the trigger, in either order: "I'll sell the rest if we break the 13ema", "If this doesn't hold I'm gonna sell the rest of my puts", "once we tap 30% we can get some trims", "needs to hold here or I'll sell the rest".
