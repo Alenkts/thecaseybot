@@ -11,19 +11,56 @@ import db
 from signal_classifier import SignalType
 
 
+class _QuietPortfolioUpdates(logging.Filter):
+    """Drops ib_async.wrapper's updatePortfolio/position/commissionReport/
+    execDetails callback dumps — these fire repeatedly on every portfolio
+    tick or fill and carry no actionable information beyond what's already
+    visible in our own ENTRY/EXIT/TRIM/ADD outcome lines and ibkr_client.py's
+    own "[ibkr_client] Order status: ... -> Filled" line (populated from its
+    own event subscription, independent of these). commissionReport's
+    realized-P&L data still reaches ibkr_client.py's daily risk tracking
+    regardless of this filter — that's wired through ib.commissionReportEvent
+    (see ibkr_client.py's track_daily_pnl); execDetails likewise still fires
+    self.ib.execDetailsEvent/trade.fillEvent — all separate subscriptions
+    from this logging call, so silencing these lines doesn't drop any
+    functional data, only the console/file echo of it. orderStatus and
+    error/warning are left alone; those are exactly the ones build_logger's
+    ib_async routing exists to preserve.
+
+    Attached to the handlers, not to the "ib_async" logger itself: these
+    messages are actually logged via the "ib_async.wrapper" child logger
+    (see ib_async/wrapper.py's self._logger), and a Filter added via
+    Logger.addFilter() only runs for records logged directly on that same
+    logger object — it's never consulted for records a child logger
+    propagates up through callHandlers(). Handlers, by contrast, see every
+    record that reaches them regardless of which child logger it came from,
+    so that's where this has to live to actually take effect."""
+
+    _SILENCED_PREFIXES = ("updatePortfolio:", "position:", "commissionReport:", "execDetails")
+
+    def filter(self, record):
+        if record.name != "ib_async.wrapper":
+            return True
+        msg = record.getMessage()
+        return not msg.startswith(self._SILENCED_PREFIXES)
+
+
 def build_logger(log_file):
     logger = logging.getLogger("casey_bot")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
     formatter = logging.Formatter("%(asctime)s [%(name)s] %(message)s")
+    quiet_portfolio_updates = _QuietPortfolioUpdates()
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(quiet_portfolio_updates)
     logger.addHandler(file_handler)
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(quiet_portfolio_updates)
     logger.addHandler(console_handler)
 
     # ib_async logs every order status change, fill, and IBKR API

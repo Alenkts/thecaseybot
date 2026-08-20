@@ -26,6 +26,9 @@ OS thread is unsupported and unsafe. Instead this reads/writes:
     req.event.wait(), not the worker thread's loop.
 """
 
+import itertools
+import logging
+import random
 import threading
 import time
 from datetime import date, datetime
@@ -45,6 +48,54 @@ _config_lock = threading.Lock()
 HOST = "127.0.0.1"
 PORT = 8787
 TICKER_VALIDATION_TIMEOUT = 10  # seconds to wait for the worker thread's IBKR check
+
+# app.js polls /api/state every 2.5s (POLL_MS) — left at werkzeug's default
+# access-log verbosity that's a "127.0.0.1 - - [...] GET /api/state 200 -"
+# line every single poll. _QuietStatePolls below silences just that one
+# noisy endpoint from werkzeug's own logger; the heartbeat print in
+# create_app's after_request hook replaces it with something readable,
+# throttled to roughly every HEARTBEAT_EVERY_N_POLLS polls (~10s at the
+# default cadence) so the console stays calm rather than swapping one kind
+# of spam for another. Printed straight to stdout, not routed through the
+# casey_bot logger/casey_bot.log — that file is meant to stay a clean
+# signal/order audit trail (see alerting.py), not a heartbeat feed.
+HEARTBEAT_EVERY_N_POLLS = 4
+
+_HEARTBEAT_PHRASES = [
+    "Casey Bridge is watching the tape... 👀",
+    "Still here, still watching for Casey's next move.",
+    "Scanning the channel — all quiet for now.",
+    "Dashboard pinged. Bot's awake and caffeinated.",
+    "Keeping an eye on things while you do literally anything else.",
+    "All systems nominal. No trades, no drama.",
+    "Watching, waiting, not trading (yet).",
+    "Heartbeat OK — Casey hasn't said anything actionable.",
+    "Casey Bridge: online and mildly bored.",
+]
+
+
+class _QuietStatePolls(logging.Filter):
+    """Drops werkzeug's default access-log line for GET /api/state (the
+    dashboard's poll endpoint, silenced in favor of the throttled heartbeat
+    print below) and for the three static requests a page reload fires
+    (index.html via "/", styles.css, app.js) — all routine, non-actionable
+    traffic. Matched on the quoted "METHOD path HTTP" request line, not a
+    bare path substring, so this can't accidentally swallow an unrelated
+    route that merely contains one of these paths (e.g. /api/state vs some
+    future /api/statefoo). Every other request/response — including
+    errors, and every POST (settings/mode/pause/positions/tickers actions)
+    — still logs normally."""
+
+    _SILENCED_REQUEST_LINES = (
+        '"GET /api/state HTTP',
+        '"GET / HTTP',
+        '"GET /styles.css HTTP',
+        '"GET /app.js HTTP',
+    )
+
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(line in msg for line in self._SILENCED_REQUEST_LINES)
 
 
 class TickerValidationRequest:
@@ -269,6 +320,20 @@ def _settings_payload(config):
 def create_app(config_path, signal_queue, validation_queue, logger):
     app = Flask(__name__, static_folder="static", static_url_path="")
 
+    _poll_count = itertools.count()
+
+    @app.after_request
+    def _heartbeat(response):
+        """Replaces the raw werkzeug access-log line for /api/state polls
+        (silenced by _QuietStatePolls) with an occasional fun one-liner —
+        see HEARTBEAT_EVERY_N_POLLS/_HEARTBEAT_PHRASES above for why this
+        prints straight to stdout rather than going through casey_bot.log."""
+        if request.path == "/api/state" and request.method == "GET":
+            n = next(_poll_count)
+            if n % HEARTBEAT_EVERY_N_POLLS == 0:
+                print(f"[Casey Bridge] {random.choice(_HEARTBEAT_PHRASES)}", flush=True)
+        return response
+
     @app.get("/")
     def index():
         return app.send_static_file("index.html")
@@ -419,6 +484,7 @@ def create_app(config_path, signal_queue, validation_queue, logger):
 
 
 def run_web(config_path, config, signal_queue, validation_queue, logger):
+    logging.getLogger("werkzeug").addFilter(_QuietStatePolls())
     app = create_app(config_path, signal_queue, validation_queue, logger)
     # use_reloader=False is required: Flask's reloader forks a subprocess,
     # which would break this thread-embedded-in-bot.py model entirely.
