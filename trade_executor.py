@@ -112,7 +112,31 @@ import yaml
 
 import db
 import ibkr_client
-from signal_classifier import SignalType
+from signal_classifier import Signal, SignalType
+from signal_parser import STRIKE_RE
+
+_skipped_entry_strikes = {}  # {ticker_symbol: set(float_strikes)}
+
+
+def _record_skipped_entry_strike(ticker, strike):
+    if ticker not in _skipped_entry_strikes:
+        _skipped_entry_strikes[ticker] = set()
+    try:
+        _skipped_entry_strikes[ticker].add(float(strike))
+    except (ValueError, TypeError):
+        pass
+
+
+def _is_skipped_entry_strike(ticker, strike):
+    try:
+        return float(strike) in _skipped_entry_strikes.get(ticker, set())
+    except (ValueError, TypeError):
+        return False
+
+
+def _clear_skipped_entry_strikes(ticker):
+    if ticker in _skipped_entry_strikes:
+        _skipped_entry_strikes[ticker].clear()
 
 # IBKR doesn't accept MARKET orders on options before 9:45am ET (prices are
 # still settling right after the open) — risk.price_type: "AUTO" exists so
@@ -199,6 +223,10 @@ def handle_entry(ib, signal, risk_cfg, logger):
     if existing:
         held = ", ".join(sorted(f"{c.lastTradeDateOrContractMonth} {c.strike}{c.right}"
                                  for c in existing))
+        if signal.raw_text:
+            m_strk = STRIKE_RE.search(signal.raw_text)
+            if m_strk:
+                _record_skipped_entry_strike(ticker, m_strk.group(1))
         msg = (f"SKIP entry {ticker} {signal.direction}: already have an open position "
                f"for this ticker ({held}) — close it out before a fresh entry, or this "
                f"should be an ADD (raw: {signal.raw_text!r})")
@@ -309,23 +337,49 @@ def _resolve_target_position(ib, signal, logger, action_label):
             logger.info(msg)
             db.update_signal_outcome(signal.db_id, msg, signal.ticker, failed=True)
             return None, 0, None
-        return matches[0]
+        target_pos = matches[0]
+    else:
+        if not open_positions:
+            msg = (f"SKIP {action_label}: no ticker in message and no open IBKR positions "
+                   f"at all (raw: {signal.raw_text!r})")
+            logger.info(msg)
+            db.update_signal_outcome(signal.db_id, msg, None, failed=True)
+            return None, 0, None
+        tickers = {c.symbol for c, _, _ in open_positions}
+        if len(tickers) > 1:
+            msg = (f"SKIP {action_label}: no ticker in message and more than one open "
+                   f"position ({sorted(tickers)}) — refusing to guess which one "
+                   f"(raw: {signal.raw_text!r})")
+            logger.info(msg)
+            db.update_signal_outcome(signal.db_id, msg, None, failed=True)
+            return None, 0, None
+        target_pos = open_positions[0]
 
-    if not open_positions:
-        msg = (f"SKIP {action_label}: no ticker in message and no open IBKR positions "
-               f"at all (raw: {signal.raw_text!r})")
-        logger.info(msg)
-        db.update_signal_outcome(signal.db_id, msg, None, failed=True)
-        return None, 0, None
-    tickers = {c.symbol for c, _, _ in open_positions}
-    if len(tickers) > 1:
-        msg = (f"SKIP {action_label}: no ticker in message and more than one open "
-               f"position ({sorted(tickers)}) — refusing to guess which one "
-               f"(raw: {signal.raw_text!r})")
-        logger.info(msg)
-        db.update_signal_outcome(signal.db_id, msg, None, failed=True)
-        return None, 0, None
-    return open_positions[0]
+    contract, _qty, _avg = target_pos
+
+    if signal.raw_text:
+        m_strk = STRIKE_RE.search(signal.raw_text)
+        if m_strk:
+            target_strike = float(m_strk.group(1))
+            contract_strike = float(contract.strike)
+
+            if _is_skipped_entry_strike(contract.symbol, target_strike):
+                msg = (f"SKIP {action_label} {contract.symbol}: entry for strike {target_strike} "
+                       f"was skipped — refusing to close existing open position ({contract_strike}) "
+                       f"(raw: {signal.raw_text!r})")
+                logger.info(msg)
+                db.update_signal_outcome(signal.db_id, msg, contract.symbol, failed=True)
+                return None, 0, None
+
+            if abs(contract_strike - target_strike) > 0.01:
+                msg = (f"SKIP {action_label} {contract.symbol}: target strike in message ({target_strike}) "
+                       f"does not match open position strike ({contract_strike}) — refusing to close "
+                       f"mismatched contract (raw: {signal.raw_text!r})")
+                logger.info(msg)
+                db.update_signal_outcome(signal.db_id, msg, contract.symbol, failed=True)
+                return None, 0, None
+
+    return target_pos
 
 
 def handle_exit(ib, signal, risk_cfg, logger):
@@ -369,6 +423,7 @@ def handle_exit(ib, signal, risk_cfg, logger):
     db.insert_order(signal.db_id, "signal", "SELL", contract.symbol, contract_label, qty,
                      price_type, ibkr_order_id=trade.order.orderId, status="submitted",
                      detail=outcome)
+    _clear_skipped_entry_strikes(contract.symbol)
     db.update_signal_outcome(signal.db_id, outcome, contract_label, failed=False)
     return trade
 
@@ -591,23 +646,27 @@ def load_reconnect_config(config_path):
     return config.get("reconnect") or {}
 
 
-def _reconnect_skip_reason(config_path, signal, reconnected_at):
+def _reconnect_skip_reason(config_path, signal, reference_time, is_reconnected=True):
     """None if a signal that was still waiting when IBKR reconnected (see
     run_worker) should go ahead and be placed now, else a string explaining
     why it shouldn't. retry_on_reconnect=false skips every such signal
     outright; retry_timeout_mins caps how long the wait is allowed to have
     been, measured from signal.received_at (when the message was classified)
-    to reconnected_at — per the reconnect.retry_timeout_mins example in
+    to reference_time — per the reconnect.retry_timeout_mins example in
     config.yaml, this is elapsed time since the signal *arrived*, not since
     IBKR went down, since a signal can arrive at any point mid-outage."""
     reconnect_cfg = load_reconnect_config(config_path)
     if not reconnect_cfg.get("retry_on_reconnect", True):
         return "IBKR was disconnected when this signal arrived and reconnect.retry_on_reconnect is false"
     timeout_mins = reconnect_cfg.get("retry_timeout_mins")
-    elapsed = reconnected_at - signal.received_at
+    elapsed = reference_time - signal.received_at
     if timeout_mins is not None and elapsed > timeout_mins * 60:
-        return (f"IBKR reconnected {elapsed / 60:.1f}min after this signal arrived, past "
-                f"reconnect.retry_timeout_mins ({timeout_mins}min)")
+        if is_reconnected:
+            return (f"IBKR reconnected {elapsed / 60:.1f}min after this signal arrived, past "
+                    f"reconnect.retry_timeout_mins ({timeout_mins}min)")
+        else:
+            return (f"Signal expired {elapsed / 60:.1f}min after arrival while IBKR was disconnected, past "
+                    f"reconnect.retry_timeout_mins ({timeout_mins}min)")
     return None
 
 
@@ -692,11 +751,6 @@ def run_worker(config_path, config, signal_queue, validation_queue, logger, stop
     risk_cfg = config["risk"]  # last-known-good; refreshed before every signal below
 
     ib = IB()
-    ibkr_client.connect_ibkr(ib, ibkr_cfg["host"], ibkr_cfg["port"], ibkr_cfg["client_id"])
-    try:
-        ib.reqPositions()  # subscribe to live position updates, used by get_open_option_position(s)
-    except Exception:
-        logger.exception("reqPositions failed (non-fatal)")
     ibkr_client.track_daily_pnl(ib)  # feeds max_daily_losing_trades / daily_loss_limit in handle_entry/handle_add
 
     handlers = {
@@ -711,85 +765,161 @@ def run_worker(config_path, config, signal_queue, validation_queue, logger, stop
     # db.positions_snapshot faster than anything will ever read it.
     snapshot_interval = 2.5
 
-    # Wall-clock time the most recent mid-run reconnect finished, or None if
-    # IBKR hasn't dropped since this worker started. Never reset back to
-    # None afterward — a signal's received_at only needs comparing against
-    # it once (see the reconnect.* check below), and every signal classified
-    # after that moment necessarily has a later received_at, so the
-    # comparison naturally stops matching on its own once the outage's
-    # backlog has drained. Deliberately NOT "was ib.isConnected() False when
-    # this exact signal was popped" — with a backlog of several signals
-    # queued during one outage, only the first one pulled after the drop
-    # would still observe the disconnected state; the rest would already see
-    # a freshly-reconnected ib and skip the check entirely, even though they
-    # arrived during the very same outage.
     reconnected_at = None
+    was_connected = False
+    last_connect_attempt = 0.0
+    backlog = []
+
+    # Recover pending signals from database at startup
+    try:
+        pending_signals = db.get_pending_signals()
+        for row in pending_signals:
+            sig = Signal(
+                type=SignalType(row["type"]),
+                ticker=row["ticker"],
+                direction=row["direction"],
+                reason=row["reason"],
+                raw_text=row["raw_text"],
+                db_id=row["id"],
+                received_at=row["ts"],
+            )
+            signal_queue.put(sig)
+            logger.info(f"[trade_executor] Recovered pending signal {sig.type.value} for {sig.ticker} from database at startup.")
+    except Exception as e:
+        logger.exception(f"[trade_executor] Failed to recover pending signals at startup: {e}")
 
     while not stop_event.is_set():
-        if not ib.isConnected():
-            # connect_ibkr (inside ensure_connected) retries indefinitely, so
-            # this blocks the whole loop — including signal_queue draining —
-            # until IBKR is back. Checked at the top of every iteration
-            # (not just the idle branch below) so a signal that's next in
-            # line gets caught by this before it's ever handed to a handler.
-            outage_started = time.time()
-            ibkr_client.ensure_connected(ib, ibkr_cfg["host"], ibkr_cfg["port"], ibkr_cfg["client_id"])
-            reconnected_at = time.time()
-            logger.info(f"[trade_executor] IBKR outage lasted "
-                        f"{reconnected_at - outage_started:.0f}s")
-
         try:
-            signal = signal_queue.get_nowait()
-        except queue.Empty:
-            # ib_async is pure-asyncio with no background reader thread —
-            # placeOrder/cancelOrder just write to the socket and return, so
-            # fills, rejections, and order-status changes only get dispatched
-            # to statusEvent/wrapper callbacks when something drives the
-            # event loop (ib.sleep does this; queue.get(timeout=...) does
-            # not). Without this, ENTRY signals and idle periods never
-            # process incoming IBKR messages at all — a fill or a rejection
-            # could sit unseen for as long as it takes the next TRIM/EXIT/ADD
-            # signal to arrive and call get_open_option_positions (which
-            # pumps the loop itself), or indefinitely if none ever does.
-            ib.sleep(1)
-            _drain_validation_queue(ib, validation_queue, logger)
-            ibkr_client.flush_pending_round_trips()
-            now = time.monotonic()
-            if now - last_snapshot >= snapshot_interval:
-                _snapshot_state(ib, logger)
-                last_snapshot = now
-            continue
+            # 1. Manage Connection State without blocking indefinitely
+            current_connected = ib.isConnected()
+            
+            # Detect state transitions and alert
+            if current_connected and not was_connected:
+                was_connected = True
+                reconnected_at = time.time()
+                logger.info("[trade_executor] IBKR connected/reconnected.")
+                try:
+                    import discord_listener
+                    discord_listener.send_private_alert("✅ Casey Bot Alert: IBKR Gateway connection established!")
+                except Exception:
+                    logger.exception("Failed to send Discord alert for connection establishment")
+                    
+            elif not current_connected:
+                if was_connected:
+                    was_connected = False
+                    logger.warning("[trade_executor] IBKR connection lost!")
+                    try:
+                        import discord_listener
+                        discord_listener.send_private_alert("⚠️ Casey Bot Alert: IBKR Gateway connection lost! Attempting to reconnect...")
+                    except Exception:
+                        logger.exception("Failed to send Discord alert for connection loss")
 
-        handler = handlers.get(signal.type)
-        if handler is None:
-            continue
+                now = time.time()
+                if now - last_connect_attempt >= 5:  # rate-limit reconnection attempts to every 5 seconds
+                    last_connect_attempt = now
+                    logger.info("[trade_executor] IBKR disconnected. Attempting to reconnect...")
+                    connected = ibkr_client.ensure_connected_nonblocking(
+                        ib, ibkr_cfg["host"], ibkr_cfg["port"], ibkr_cfg["client_id"], timeout=3
+                    )
+                    if connected:
+                        was_connected = True
+                        reconnected_at = time.time()
+                        logger.info("[trade_executor] IBKR connected successfully.")
+                        try:
+                            import discord_listener
+                            discord_listener.send_private_alert("✅ Casey Bot Alert: IBKR Gateway connection restored!")
+                        except Exception:
+                            logger.exception("Failed to send Discord alert for reconnection")
 
-        if reconnected_at is not None and signal.received_at < reconnected_at:
-            skip_reason = _reconnect_skip_reason(config_path, signal, reconnected_at)
-            if skip_reason:
-                msg = (f"SKIP {signal.type.value} {signal.ticker or ''}: {skip_reason} — "
-                       f"discarding (raw: {signal.raw_text!r})")
-                logger.info(msg)
-                db.update_signal_outcome(signal.db_id, msg, signal.ticker, failed=True)
-                _snapshot_state(ib, logger)
-                last_snapshot = time.monotonic()
+            # 2. Check backlog for timeouts (even while disconnected!)
+            now = time.time()
+            for sig in list(backlog):
+                skip_reason = _reconnect_skip_reason(config_path, sig, now, is_reconnected=False)
+                if skip_reason:
+                    msg = (f"SKIP {sig.type.value} {sig.ticker or ''}: {skip_reason} — "
+                           f"discarding (raw: {sig.raw_text!r})")
+                    logger.info(msg)
+                    db.update_signal_outcome(sig.db_id, msg, sig.ticker, failed=True)
+                    backlog.remove(sig)
+
+            # 3. Pull new signal or get one from backlog
+            signal = None
+            if backlog and ib.isConnected():
+                signal = backlog.pop(0)
+                logger.info(f"[trade_executor] Processing backlogged signal {signal.type.value} for {signal.ticker}")
+            else:
+                try:
+                    signal = signal_queue.get_nowait()
+                    if not ib.isConnected():
+                        backlog.append(signal)
+                        logger.info(f"[trade_executor] Enqueued {signal.type.value} signal for {signal.ticker} to backlog (IBKR disconnected)")
+                        signal = None
+                except queue.Empty:
+                    pass
+
+            if signal is None:
+                try:
+                    ib.sleep(1)
+                except asyncio.CancelledError:
+                    logger.warning("[trade_executor] Worker loop received CancelledError during sleep")
+                except Exception as e:
+                    logger.exception(f"[trade_executor] Exception during ib.sleep: {e}")
+                    
+                _drain_validation_queue(ib, validation_queue, logger)
+                ibkr_client.flush_pending_round_trips()
+                
+                if ib.isConnected():
+                    now_mono = time.monotonic()
+                    if now_mono - last_snapshot >= snapshot_interval:
+                        _snapshot_state(ib, logger)
+                        last_snapshot = now_mono
                 continue
 
-        try:
-            risk_cfg = load_risk_config(config_path)
-        except Exception:
-            logger.exception(f"Failed to reload config.yaml before handling {signal.type.value} "
-                              f"signal — using last-known-good risk settings instead")
-        try:
-            handler(ib, signal, risk_cfg, logger)
-        except Exception:
-            logger.exception(f"Error handling {signal.type.value} signal: {signal}")
-            db.update_signal_outcome(signal.db_id, f"Error handling {signal.type.value} signal "
-                                      f"(see casey_bot.log)", signal.ticker, failed=True)
-        # refresh immediately after anything that could have changed
-        # positions, rather than waiting for the next idle tick — keeps the
-        # UI's Positions screen snappy right after a fill.
-        _snapshot_state(ib, logger)
-        last_snapshot = time.monotonic()
+            # 4. Process the signal
+            handler = handlers.get(signal.type)
+            if handler is None:
+                continue
 
-    ib.disconnect()
+            if reconnected_at is not None and signal.received_at < reconnected_at:
+                skip_reason = _reconnect_skip_reason(config_path, signal, reconnected_at)
+                if skip_reason:
+                    msg = (f"SKIP {signal.type.value} {signal.ticker or ''}: {skip_reason} — "
+                           f"discarding (raw: {signal.raw_text!r})")
+                    logger.info(msg)
+                    db.update_signal_outcome(signal.db_id, msg, signal.ticker, failed=True)
+                    _snapshot_state(ib, logger)
+                    last_snapshot = time.monotonic()
+                    continue
+
+            try:
+                risk_cfg = load_risk_config(config_path)
+            except Exception:
+                logger.exception(f"Failed to reload config.yaml before handling {signal.type.value} "
+                                  f"signal — using last-known-good risk settings instead")
+            try:
+                handler(ib, signal, risk_cfg, logger)
+            except Exception:
+                logger.exception(f"Error handling {signal.type.value} signal: {signal}")
+                db.update_signal_outcome(signal.db_id, f"Error handling {signal.type.value} signal "
+                                          f"(see casey_bot.log)", signal.ticker, failed=True)
+            
+            _snapshot_state(ib, logger)
+            last_snapshot = time.monotonic()
+
+        except asyncio.CancelledError:
+            logger.warning("[trade_executor] Worker loop received CancelledError, continuing...")
+            try:
+                ib.sleep(1)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("[trade_executor] Unexpected error in worker loop")
+            try:
+                ib.sleep(2)
+            except Exception:
+                pass
+
+    try:
+        ib.disconnect()
+    except Exception:
+        pass

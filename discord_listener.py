@@ -21,9 +21,31 @@ client's connection fingerprint; running a plain discord.py Client with a
 user token will get rejected outright.
 """
 
+import asyncio
 import logging
 
 import discord
+
+_client = None
+
+
+def send_private_alert(text):
+    """Sends a private DM to the self user. Thread-safe."""
+    global _client
+    if _client is None:
+        return
+    # Check if client event loop is running and client is ready
+    if not _client.is_ready():
+        return
+    
+    async def _send():
+        try:
+            await _client.user.send(text)
+            logging.getLogger("casey_bot").info(f"[discord_listener] Sent private alert: {text}")
+        except Exception as e:
+            logging.getLogger("casey_bot").error(f"[discord_listener] Failed to send private Discord alert: {e}")
+            
+    asyncio.run_coroutine_threadsafe(_send(), _client.loop)
 
 
 def run(user_token, channel_id, casey_user_id, on_message_text, on_connected=None,
@@ -32,6 +54,7 @@ def run(user_token, channel_id, casey_user_id, on_message_text, on_connected=Non
     keep them fast) the caller can use to observe connection health without
     this module needing to know anything about how that's tracked (bot.py
     wires them to db.py's bot_state for the web UI's health indicator)."""
+    global _client
     # discord.http has exactly two INFO-level log calls in the whole module
     # (the user-agent and TLS-fingerprint-target echoes printed once per
     # connect) — everything else it logs (rate limits, Cloudflare throttling,
@@ -42,15 +65,15 @@ def run(user_token, channel_id, casey_user_id, on_message_text, on_connected=Non
     # "discord" logger's level/handler but never touches this child's level.
     logging.getLogger("discord.http").setLevel(logging.WARNING)
 
-    client = discord.Client()
+    _client = discord.Client()
 
-    @client.event
+    @_client.event
     async def on_ready():
-        print(f"Logged in as {client.user}. Watching channel {channel_id} for user {casey_user_id}.")
+        print(f"Logged in as {_client.user}. Watching channel {channel_id} for user {casey_user_id}.")
         if on_connected:
             on_connected()
 
-    @client.event
+    @_client.event
     async def on_message(message):
         if message.channel.id != channel_id:
             return
@@ -62,4 +85,4 @@ def run(user_token, channel_id, casey_user_id, on_message_text, on_connected=Non
             on_message_seen()
         await on_message_text(message.content)
 
-    client.run(user_token)
+    _client.run(user_token)

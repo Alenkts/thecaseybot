@@ -140,6 +140,15 @@ def update_signal_outcome(signal_id, outcome_text, outcome_instrument=None, fail
         )
 
 
+def get_pending_signals():
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM signals WHERE outcome_text IS NULL AND type != 'NOISE' "
+            "AND blocked_reason IS NULL ORDER BY ts ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_recent_signals(limit=200):
     with _conn() as conn:
         rows = conn.execute(

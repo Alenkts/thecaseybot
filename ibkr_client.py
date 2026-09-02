@@ -107,6 +107,25 @@ def ensure_connected(ib, host, port, client_id):
     _logger.info("[ibkr_client] IBKR reconnected.")
 
 
+def ensure_connected_nonblocking(ib, host, port, client_id, timeout=3):
+    """A non-blocking reconnect attempt that tries to connect exactly once
+    with the given timeout, returning True if connected, else False. This
+    prevents blocking the main execution thread during prolonged outages."""
+    if ib.isConnected():
+        return True
+    try:
+        ib.connect(host, port, clientId=client_id, timeout=timeout)
+        clear_streaming_cache()
+        try:
+            ib.reqPositions()
+        except Exception:
+            _logger.exception("[ibkr_client] reqPositions failed after reconnect (non-fatal)")
+        return True
+    except Exception as e:
+        _logger.warning(f"[ibkr_client] Reconnection attempt failed: {e}")
+        return False
+
+
 # ── underlying price / option chain / contract selection ────────────────────
 _stock_cache = {}
 
