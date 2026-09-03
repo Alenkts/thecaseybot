@@ -526,15 +526,17 @@ def get_last_price(ib, contract):
 
 
 def get_entry_price_snapshot(ib, contract):
-    """Same best-effort last-traded price as get_last_price, but also
-    returns the underlying Ticker snapshot itself — for handle_entry's
-    dynamic (capital-per-trade) contract sizing, which needs a real price
-    *before* qty is known and thus before place_order's own price lookup.
+    """Fetches real-time price snapshot for handle_entry's dynamic sizing.
+    Uses MIDPOINT (bid-ask midpoint via limit_price_from_quote) when live quotes
+    are available, falling back to LAST/CLOSE if bid/ask are missing, so fast-moving
+    or 0DTE options size off current market value rather than stale last trades.
     Returning the Ticker alongside lets that same snapshot be passed into
-    place_order(tkr=...) afterward so pricing the order doesn't poll IBKR a
-    second time for data already in hand. Returns (price_or_None, tkr)."""
+    place_order(tkr=...) afterward. Returns (price_or_None, tkr)."""
     tkr = _snapshot(ib, contract)
-    return _best_price(tkr), tkr
+    price = limit_price_from_quote(tkr.bid, tkr.ask, tkr.last, "MIDPOINT")
+    if price <= 0:
+        price = _best_price(tkr)
+    return (price if price and price > 0 else None), tkr
 
 
 def compute_limit_price(ib, contract, price_type, tkr=None):
